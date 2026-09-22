@@ -153,8 +153,35 @@ class DefaultAgent:
 
     def execute_actions(self, message: dict) -> list[dict]:
         """Execute actions in message, add observation messages, return them."""
-        outputs = [self.env.execute(action) for action in message.get("extra", {}).get("actions", [])]
+        outputs = [self._execute_action_timed(action) for action in message.get("extra", {}).get("actions", [])]
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+
+    def _execute_action_timed(self, action: dict) -> dict:
+        """Execute one tool and record the exact wall-clock duration of the call."""
+        started_wall = time.time()
+        started = time.perf_counter()
+        try:
+            output = self.env.execute(action)
+        except InterruptAgentFlow as error:
+            # A successful submit command raises Submitted after execution. Preserve
+            # its timing on the exit message before propagating the control flow.
+            timing = {
+                "tool_started_at": started_wall,
+                "tool_finished_at": time.time(),
+                "tool_duration_seconds": time.perf_counter() - started,
+            }
+            for message in error.messages:
+                message.setdefault("extra", {}).update(timing)
+            raise
+
+        output.setdefault("extra", {}).update(
+            {
+                "tool_started_at": started_wall,
+                "tool_finished_at": time.time(),
+                "tool_duration_seconds": time.perf_counter() - started,
+            }
+        )
+        return output
 
     def serialize(self, *extra_dicts) -> dict:
         """Serialize agent state to a json-compatible nested dictionary for saving."""
