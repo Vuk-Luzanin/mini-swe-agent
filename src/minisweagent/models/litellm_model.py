@@ -61,7 +61,6 @@ class LitellmModel:
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
-    # This is the main query method that sends messages to the LiteLLM API and streams the response.
     def _query(self, messages: list[dict[str, str]], **kwargs):
         try:
             return litellm.completion(
@@ -82,37 +81,7 @@ class LitellmModel:
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
             with attempt:
-                prepared_messages = self._prepare_messages_for_api(messages)
-                request_start = time.perf_counter()
-                stream_kwargs = self.config.model_kwargs | kwargs
-                stream_kwargs["stream"] = True
-                stream_options = dict(stream_kwargs.get("stream_options") or {})
-
-                # include token usage in the stream, so we can calculate TTFT/TBT metrics
-                stream_options["include_usage"] = True
-                stream_kwargs["stream_options"] = stream_options
-
-                # stream the response and collect chunks and their timestamps
-                chunks = []
-                chunk_times = []        # format: list of timestamps (float) when each chunk with output was received
-                stream = self._query(prepared_messages, **stream_kwargs)
-                for chunk in stream:
-                    chunks.append(chunk)
-                    if self._chunk_has_output(chunk):
-                        chunk_times.append(time.perf_counter())
-                response = litellm.stream_chunk_builder(
-                    chunks=chunks,
-                    messages=prepared_messages,
-                    start_time=request_start,
-                    end_time=time.perf_counter(),
-                )
-                if response is None:
-                    raise RuntimeError("LiteLLM returned no response after streaming")
-                stream_metrics = self._stream_metrics(
-                    request_start=request_start,
-                    chunk_times=chunk_times,
-                    response=response,
-                )
+                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
         cost_output = self._calculate_cost(response)
         GLOBAL_MODEL_STATS.add(cost_output["cost"])
         # Note: all model.query() implementations must persist the response and cost on FormatError.
@@ -120,7 +89,6 @@ class LitellmModel:
             actions = self._parse_actions(response)
         except FormatError as e:
             e.messages[0]["extra"].update(cost_output)
-            e.messages[0]["extra"]["stream_metrics"] = stream_metrics
             try:
                 e.messages[0]["extra"]["response"] = response.model_dump(mode="json")
             except Exception:
@@ -132,70 +100,10 @@ class LitellmModel:
         message["extra"] = {
             "actions": actions,
             "response": response.model_dump(),
-            "stream_metrics": stream_metrics,
             **cost_output,
             "timestamp": time.time(),
         }
         return message
-
-    @staticmethod
-    def _chunk_has_output(chunk) -> bool:
-        """Ignore stream metadata/usage chunks when timing generated output."""
-        choices = getattr(chunk, "choices", None)
-        if not choices:
-            return False
-        delta = getattr(choices[0], "delta", None)
-        if delta is None and isinstance(choices[0], dict):
-            delta = choices[0].get("delta")
-        if delta is None:
-            return False
-        if isinstance(delta, dict):
-            return any(delta.get(key) for key in ("content", "tool_calls", "function_call", "reasoning_content"))
-        return any(
-            getattr(delta, key, None)
-            for key in ("content", "tool_calls", "function_call", "reasoning_content")
-        )
-
-    @staticmethod
-    def _stream_metrics(*, request_start: float, chunk_times: list[float], response) -> dict[str, float | int | str | None]:
-        """Return first-output TTFT and average generation TBT with its basis."""
-        if not chunk_times:
-            logger.error(
-                "Exact token-based TTFT/TBT unavailable: streaming response "
-                "contained no output chunks; results will not be recorded."
-            )
-            return {
-                "ttft_ms": None,
-                "tbt_ms": None,
-                "stream_chunks": 0,
-                "completion_tokens": None,
-                "tbt_basis": "error",
-            }
-
-        ttft_ms = (chunk_times[0] - request_start) * 1000.0
-        usage = getattr(response, "usage", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        if completion_tokens is None and isinstance(usage, dict):
-            completion_tokens = usage.get("completion_tokens")
-
-        # tbt_basis just to indicate 
-        if isinstance(completion_tokens, (int, float)) and completion_tokens > 1:
-            tbt_ms = (chunk_times[-1] - chunk_times[0]) * 1000.0 / (completion_tokens - 1)
-            tbt_basis = "tokens"
-        else:
-            tbt_ms = None
-            tbt_basis = "error"
-            logger.error(
-                "Exact token-based TBT unavailable: streaming response did not "
-                "include completion_tokens > 1; TBT result will not be recorded."
-            )
-        return {
-            "ttft_ms": ttft_ms,
-            "tbt_ms": tbt_ms,
-            "stream_chunks": len(chunk_times),
-            "completion_tokens": completion_tokens,
-            "tbt_basis": tbt_basis,
-        }
 
     def _calculate_cost(self, response) -> dict[str, float]:
         try:
