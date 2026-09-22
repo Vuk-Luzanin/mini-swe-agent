@@ -186,3 +186,8 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 
+# Local benchmark checkout, logs, and environment snapshots
+/SWE-bench/
+/logs/
+/gold.validate-gold.json
+/requirements-installed.txt
