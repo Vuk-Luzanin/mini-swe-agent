@@ -3,6 +3,7 @@ import os
 import platform
 import shlex
 import subprocess
+import time
 import uuid
 from typing import Any
 
@@ -56,7 +57,16 @@ class DockerEnvironment:
         self.logger = logger or logging.getLogger("minisweagent.environment")
         self.container_id: str | None = None
         self.config = config_class(**kwargs)
+
+        # Wall-clock start time; used later as tool_started_at.
+        initialization_started_wall = time.time()
+        # Monotonic start time; used later to calculate the duration precisely.
+        initialization_started = time.perf_counter()
         self._start_container()
+
+        # These values let the agent include Docker initialization in the first tool interval.
+        self._tool_initialization_started_wall = initialization_started_wall
+        self._tool_initialization_started = initialization_started
 
     def get_template_vars(self, **kwargs) -> dict[str, Any]:
         return recursive_merge(self.config.model_dump(), platform.uname()._asdict(), kwargs)

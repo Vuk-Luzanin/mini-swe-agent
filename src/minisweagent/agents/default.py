@@ -157,17 +157,30 @@ class DefaultAgent:
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
 
     def _execute_action_timed(self, action: dict) -> dict:
-        """Execute one tool and record the exact wall-clock duration of the call."""
+        """Execute one tool and include Docker initialization in the first call."""
+        # Wall-clock start time used for tool_started_at
         started_wall = time.time()
+        # Monotonic start time used to calculate tool_duration_seconds
         started = time.perf_counter()
+        # Check whether Docker initialization started the first-tool interval.
+        initialization_started = getattr(self.env, "_tool_initialization_started", None)
+        initialization_started_wall = getattr(self.env, "_tool_initialization_started_wall", None)
+        if initialization_started is not None:
+            # The first tool includes Docker initialization and the startup command, so it is measured from the start of the Docker initialization
+            started_wall = initialization_started_wall
+            started = initialization_started
+            self.env._tool_initialization_started = None            # next tool will not include Docker initialization
+        # Later tools measure only the env.execute(action) interval.
         try:
             output = self.env.execute(action)
         except InterruptAgentFlow as error:
             # A successful submit command raises Submitted after execution. Preserve
             # its timing on the exit message before propagating the control flow.
             timing = {
+                # Wall-clock timestamps for the tool interval
                 "tool_started_at": started_wall,
                 "tool_finished_at": time.time(),
+                # Docker init + startup + first tool, or only the later tool.
                 "tool_duration_seconds": time.perf_counter() - started,
             }
             for message in error.messages:
@@ -178,6 +191,7 @@ class DefaultAgent:
             {
                 "tool_started_at": started_wall,
                 "tool_finished_at": time.time(),
+                # Docker init + startup + first tool, or only the later tool.
                 "tool_duration_seconds": time.perf_counter() - started,
             }
         )
